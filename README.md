@@ -46,7 +46,7 @@ Everything environment-specific lives in **`~/.config/muse-run/env`** (plain she
 | `MUSE_OPENCODE` | `opencode` | Binary path, if not on PATH for detached jobs |
 | `MUSE_SERVER` | unset | Opt-in attach to a persistent `opencode serve` (hung on short runs with 1.18.27) |
 
-`env.example` carries three commented memory profiles: small VPS (4 cores / 8 GB), 16 GB laptop, 32 GB+ workstation. The memory gate, not `MUSE_MAX_JOBS`, is what does the real limiting on small hosts.
+`env.example` carries four commented memory profiles: small VPS (4 cores / 8 GB), 16 GB laptop, 36 GB MacBook, 32 GB+ workstation. The memory gate, not `MUSE_MAX_JOBS`, is what does the real limiting on small hosts.
 
 ### The two caps
 
