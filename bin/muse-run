@@ -1,0 +1,237 @@
+#!/usr/bin/env bash
+# muse-run — run one task on Meta Muse Spark 1.3 (free, OpenCode Zen) through opencode
+# and print the model's answer. Used by the `muse` relay agent (agents/muse.md).
+#
+#   muse-run [-d DIR] [-m provider/model] "task"     run; wait up to MUSE_WAIT s (540)
+#   muse-run [-d DIR] <<'EOF' ... EOF                 (task on stdin)
+#   muse-run --start [-d DIR] [-m MODEL] "task"       launch detached, print job id, exit 0
+#   muse-run --wait [-t SECONDS] ID                   block up to SECONDS (540), print answer
+#   muse-run --status                                 list jobs (+ slots and free memory on stderr)
+#   muse-run --env                                    print effective settings and exit
+#   stdin starting with the line MUSE-START, or the text MUSE-WAIT <id>, means the
+#   same as --start / --wait (in-band protocol for the relay agent, which pipes verbatim)
+#
+# Every run is a detached job under $MUSE_JOBS (~/.cache/muse-run/jobs/<id>/). The
+# foreground call only *waits*; if the job is still running when the wait expires,
+# stdout gets exactly one line
+#     MUSE-RUN PENDING <id>
+# and the exit code is 3. Call `muse-run --wait <id>` again to keep waiting. This is
+# what lets a job outlive Claude Code's 10-minute Bash cap: the relay agent loops.
+# The hard wall per job is MUSE_MAX seconds (3600).
+#
+# Start gate (so many parallel jobs can't exhaust RAM): a job starts only when
+# fewer than MUSE_MAX_JOBS (6) are running AND available memory minus
+# MUSE_MEM_RESERVE_MB (1024) leaves room for MUSE_JOB_MB (800) more. Otherwise
+# --start polls for a slot for up to MUSE_START_WAIT s (300), then exits 4.
+# One opencode run is ~7 s startup and 580-900 MB RSS (measured 2026-09-05).
+#
+# Exit codes: 0 ok · 2 usage · 3 still running (PENDING) · 4 no slot · other = opencode's rc
+#
+# Settings: every MUSE_* knob is read from the environment, with ~/.config/muse-run/env
+# (or $MUSE_RUN_ENV) sourced first. See env.example in the repo.
+#
+# Portable: Linux and macOS. Needs bash (3.2+), jq, opencode. Uses setsid/timeout when
+# present (Linux, or coreutils on macOS) and falls back to perl setsid + a bash watchdog.
+set -uo pipefail
+ENV_FILE=${MUSE_RUN_ENV:-${XDG_CONFIG_HOME:-$HOME/.config}/muse-run/env}
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+
+MODEL=${MUSE_MODEL:-opencode/muse-spark-1.3-contributor-free}
+DIR=$PWD
+SERVER=${MUSE_SERVER:-}                   # opt-in `opencode serve` attach (hung on short runs 2026-09-05)
+WAIT=${MUSE_WAIT:-${MUSE_TIMEOUT:-540}}   # foreground wait; Claude's Bash tool caps at 600
+MAX=${MUSE_MAX:-3600}                     # hard wall per job
+MAX_JOBS=${MUSE_MAX_JOBS:-6}
+JOB_MB=${MUSE_JOB_MB:-800}
+RESERVE_MB=${MUSE_MEM_RESERVE_MB:-1024}
+START_WAIT=${MUSE_START_WAIT:-300}
+JOBS=${MUSE_JOBS:-${XDG_CACHE_HOME:-$HOME/.cache}/muse-run/jobs}
+OPENCODE=${MUSE_OPENCODE:-opencode}
+mkdir -p "$JOBS"
+
+MODE=run
+case ${1:-} in
+  --start)  MODE=start; shift ;;
+  --wait)   MODE=wait;  shift ;;
+  --status) MODE=status; shift ;;
+  --env)
+    printf 'MUSE_MODEL=%s\nMUSE_WAIT=%s\nMUSE_MAX=%s\nMUSE_MAX_JOBS=%s\nMUSE_JOB_MB=%s\nMUSE_MEM_RESERVE_MB=%s\nMUSE_START_WAIT=%s\nMUSE_JOBS=%s\nMUSE_OPENCODE=%s\nMUSE_SERVER=%s\nenv_file=%s%s\n' \
+      "$MODEL" "$WAIT" "$MAX" "$MAX_JOBS" "$JOB_MB" "$RESERVE_MB" "$START_WAIT" "$JOBS" "$OPENCODE" "$SERVER" "$ENV_FILE" "$([ -f "$ENV_FILE" ] || echo ' (missing, defaults)')"
+    exit 0 ;;
+  -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
+esac
+
+while getopts d:m:t: o; do
+  case $o in
+    d) DIR=$OPTARG ;;
+    m) MODEL=$OPTARG ;;
+    t) WAIT=$OPTARG ;;
+    *) echo "usage: muse-run [--start|--wait ID|--status|--env] [-d DIR] [-m MODEL] [-t SECONDS] task" >&2; exit 2 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+# ---------- helpers ----------
+now_iso()   { date '+%Y-%m-%dT%H:%M:%S%z'; }
+job_alive() { [ -f "$1/pid" ] && kill -0 "$(cat "$1/pid")" 2>/dev/null; }
+job_done()  { [ -f "$1/rc" ]; }
+running_count() {
+  local n=0 j
+  for j in "$JOBS"/*/; do
+    [ -d "$j" ] || continue
+    job_done "$j" && continue
+    job_alive "$j" && n=$((n + 1))
+  done
+  echo $n
+}
+mem_available_mb() {
+  if [ -r /proc/meminfo ]; then
+    awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo
+  elif command -v vm_stat >/dev/null 2>&1; then
+    # macOS: free + inactive + speculative pages, in the page size vm_stat reports
+    vm_stat | awk '
+      /page size of/ {ps=$8}
+      /^Pages free/ {f=$3} /^Pages inactive/ {i=$3} /^Pages speculative/ {s=$3}
+      END {gsub(/\./,"",f); gsub(/\./,"",i); gsub(/\./,"",s); print int((f+i+s)*ps/1048576)}'
+  else
+    echo 999999   # unknown platform: never block on memory
+  fi
+}
+detach() {  # run "$@" in its own session, fully detached from this shell
+  if command -v setsid >/dev/null 2>&1; then
+    setsid nohup "$@" > /dev/null 2>&1 &
+  elif command -v perl >/dev/null 2>&1; then
+    nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- "$@" > /dev/null 2>&1 &
+  else
+    nohup "$@" > /dev/null 2>&1 &
+  fi
+}
+
+print_result() {  # $1 = job dir; prints answer, returns opencode's rc
+  local j=$1
+  jq -r '
+    if .type == "tool_use" then
+      "→ \(.part.tool // "?") \((.part.state.input // {}) | tostring | .[0:100])"
+    elif .type == "step_finish" then
+      "· tokens in=\(.part.tokens.input // 0) out=\(.part.tokens.output // 0) cost=\(.part.cost // 0)"
+    else empty end' "$j/out.json" >&2 2>/dev/null
+  jq -r 'select(.type == "text") | .part.text' "$j/out.json"
+  local rc
+  rc=$(cat "$j/rc")
+  if [ "$rc" -ne 0 ]; then
+    echo "muse-run: opencode exited $rc (job $(basename "$j"))" >&2
+    tail -n 5 "$j/err" >&2
+  fi
+  return "$rc"
+}
+
+wait_job() {  # $1 = job dir, $2 = seconds; exit 3 + PENDING line if still running
+  local j=$1 deadline=$(( $(date +%s) + $2 ))
+  while ! job_done "$j"; do
+    if ! job_alive "$j"; then
+      echo "muse-run: job $(basename "$j") died without result" >&2
+      tail -n 5 "$j/err" 2>/dev/null >&2
+      return 1
+    fi
+    [ "$(date +%s)" -ge "$deadline" ] && { echo "MUSE-RUN PENDING $(basename "$j")"; return 3; }
+    sleep 2
+  done
+  print_result "$j"
+}
+
+start_job() {  # reads $TASK $DIR $MODEL; prints job id
+  # prune jobs older than two days
+  find "$JOBS" -mindepth 1 -maxdepth 1 -type d -mtime +2 -exec rm -rf {} + 2>/dev/null
+  # gate: job count + memory
+  local deadline=$(( $(date +%s) + START_WAIT )) n avail
+  while :; do
+    n=$(running_count); avail=$(mem_available_mb)
+    if [ "$n" -lt "$MAX_JOBS" ] && [ $((avail - RESERVE_MB)) -ge "$JOB_MB" ]; then break; fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "muse-run: no slot after ${START_WAIT}s (running=$n/$MAX_JOBS, available=${avail} MB)" >&2
+      exit 4
+    fi
+    sleep 5
+  done
+
+  local id j
+  id=$(date +%Y%m%d-%H%M%S)-$$-$RANDOM
+  j=$JOBS/$id
+  mkdir -p "$j"
+  printf '%s' "$TASK" > "$j/task"
+  printf 'dir=%s\nmodel=%s\nstarted=%s\n' "$DIR" "$MODEL" "$(now_iso)" > "$j/meta"
+
+  local attach=""
+  if [ -n "$SERVER" ]; then
+    local code
+    code=$(curl -s -o /dev/null -m 2 -w '%{http_code}' "$SERVER/" 2>/dev/null || true)
+    [ "$code" != "000" ] && [ -n "$code" ] && attach="--attach $SERVER"
+  fi
+
+  # timeout(1) when we have it (Linux, or coreutils on macOS); else a bash watchdog
+  local tmo=""
+  if command -v timeout >/dev/null 2>&1; then tmo="timeout $MAX"
+  elif command -v gtimeout >/dev/null 2>&1; then tmo="gtimeout $MAX"; fi
+
+  cat > "$j/run.sh" <<EOF
+#!/usr/bin/env bash
+echo \$\$ > "$j/pid"
+cd "$DIR" || { echo 1 > "$j/rc"; exit 1; }
+if [ -n "$tmo" ]; then
+  $tmo $OPENCODE run $attach --auto -m "$MODEL" --dir "$DIR" --format json "\$(cat "$j/task")" > "$j/out.json" 2> "$j/err"
+  rc=\$?
+else
+  $OPENCODE run $attach --auto -m "$MODEL" --dir "$DIR" --format json "\$(cat "$j/task")" > "$j/out.json" 2> "$j/err" &
+  cpid=\$!
+  ( sleep $MAX; kill \$cpid 2>/dev/null ) & wpid=\$!
+  wait \$cpid; rc=\$?
+  kill \$wpid 2>/dev/null
+fi
+date '+%Y-%m-%dT%H:%M:%S%z' > "$j/finished"
+echo \$rc > "$j/rc"
+EOF
+  chmod +x "$j/run.sh"
+  detach "$j/run.sh"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$j/pid" ] && break; sleep 0.5; done
+  echo "$id"
+}
+
+# ---------- modes ----------
+case $MODE in
+  status)
+    for j in "$JOBS"/*/; do
+      [ -d "$j" ] || continue
+      id=$(basename "$j")
+      if job_done "$j"; then st="done rc=$(cat "$j/rc")"
+      elif job_alive "$j"; then st=running
+      else st=dead; fi
+      printf '%s  %-14s %s\n' "$id" "$st" "$(head -c 60 "$j/task" | tr '\n' ' ')"
+    done
+    echo "running=$(running_count)/$MAX_JOBS  available=$(mem_available_mb) MB" >&2
+    exit 0 ;;
+  wait)
+    id=${1:-}; [ -n "$id" ] || { echo "muse-run --wait: missing job id" >&2; exit 2; }
+    j=$JOBS/$id; [ -d "$j" ] || { echo "muse-run --wait: no such job $id" >&2; exit 2; }
+    wait_job "$j" "$WAIT"; exit $? ;;
+esac
+
+# start / run
+if [ $# -gt 0 ]; then TASK="$*"; else TASK=$(cat); fi
+[ -n "${TASK// /}" ] || { echo "muse-run: empty task" >&2; exit 2; }
+# In-band protocol, so a relay that only pipes text verbatim can still use start/wait:
+#   first line "MUSE-START"  → same as --start with the rest of the text as task
+#   text "MUSE-WAIT <id>"    → same as --wait <id>
+NL=$'\n'
+case $TASK in
+  MUSE-START|MUSE-START"$NL"*) MODE=start; TASK=${TASK#MUSE-START}; TASK=${TASK#"$NL"}
+    [ -n "${TASK// /}" ] || { echo "muse-run: MUSE-START without a task" >&2; exit 2; } ;;
+  MUSE-WAIT\ *) id=$(printf '%s' "$TASK" | awk 'NR==1 {print $2}')
+    j=$JOBS/$id; [ -d "$j" ] || { echo "muse-run: MUSE-WAIT: no such job '$id'" >&2; exit 2; }
+    wait_job "$j" "$WAIT"; exit $? ;;
+esac
+[ -d "$DIR" ] || { echo "muse-run: no such dir: $DIR" >&2; exit 2; }
+DIR=$(cd "$DIR" && pwd)
+
+id=$(start_job) || exit $?
+if [ "$MODE" = start ]; then echo "$id"; exit 0; fi
+wait_job "$JOBS/$id" "$WAIT"; exit $?
