@@ -71,7 +71,7 @@ Portable to Linux and macOS: reads `/proc/meminfo` or `vm_stat`, uses `timeout`/
 ## Known behaviour of Muse Spark 1.3
 
 - **It does not verify unless told.** It reads and reasons but skips running tests, builds, or audits. Prompts that should verify must say so literally ("run `npm test` and paste the last 20 lines").
-- Prompts are self-contained: Muse sees the repo (`AGENTS.md → CLAUDE.md` through opencode) but nothing from the Claude conversation.
+- Prompts are self-contained: Muse sees the repo (`AGENTS.md` through opencode) but nothing from the Claude conversation.
 - Parallel editors need `isolation: 'worktree'` in the Workflow; `muse-run` runs in the agent's cwd.
 - The Haiku relay must be told bluntly not to do the task itself, and not to `--wait` on a `MUSE-START` job. `agents/muse.md` says both; in a session older than an edit to it, add a one-line "RELAY NOTE" to the prompt.
 

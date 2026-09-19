@@ -11,7 +11,7 @@ The user wants the task after `/musecode` done the ultracode way — decomposed 
 - `~/.claude/agents/muse.md` is a Haiku relay: it pipes its prompt into `muse-run`, which runs a standalone `opencode run --auto -m opencode/muse-spark-1.3-contributor-free` (about 7 s startup per call) and returns Muse's answer verbatim. Cost per agent: a few thousand Haiku tokens for the relay; the Muse work is free.
 - In a Workflow script, `agent(prompt, {agentType: 'muse', ...})` therefore runs on Muse. `schema` still works — the relay fills the StructuredOutput from Muse's text.
 - Outside workflows the same thing is `Agent({subagent_type: 'muse', prompt})`.
-- Muse reads `AGENTS.md → CLAUDE.md` in the repo through opencode, so it has the same project context.
+- Muse reads `AGENTS.md` in the repo through opencode, so it has the same project context.
 - **Jobs are detached**: `muse-run` launches opencode as a background job under `~/.cache/muse-run/jobs/<id>/` and only *waits* in the foreground. If the wait passes 540 s it prints `MUSE-RUN PENDING <id>` and exits 3; the relay then loops `muse-run --wait <id>`. A Muse job may therefore run for up to **one hour** (`MUSE_MAX`), not ten minutes. `muse-run --status` lists jobs; `muse-run --env` shows the effective settings.
 
 ## The two caps, and how far they go
