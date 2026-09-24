@@ -38,7 +38,7 @@ The user wants the task after `/musecode` done the ultracode way — decomposed 
        agent(`MUSE-WAIT ${id.trim()}`, {agentType: 'muse', label: `wait:${i}`, phase: 'Wait', schema: OUT_SCHEMA})))
      ```
      Wall-clock ≈ slowest job + ~15 s per start, instead of jobs running cap-at-a-time.
-     **Caveat (2026-09-05):** the Haiku relay tended to run `--start` and then helpfully `--wait` on the id itself, which serialised the fan-out again and fed the WAIT phase the full text instead of an id. `muse.md` forbids that, but agent definitions load at session start — in a session older than the edit, prefix the task text after the `MUSE-START` line with a one-line "RELAY NOTE: return the job id and stop, do not `--wait`" and the relay complies. Verify with `muse-run --status` that N jobs show `running` at once. Plain `agent()` (start+wait in one relay) is still right for fan-outs within the cap or when a pipeline stage needs the result immediately.
+     Verify with `muse-run --status` that N jobs show `running` at once. Plain `agent()` (start+wait in one relay) is still right for fan-outs within the cap or when a pipeline stage needs the result immediately.
    - **Use the ultracode quality patterns, sized for free workers.** The Workflow reference's patterns (adversarial verify, perspective-diverse verify, judge panel, loop-until-dry, multi-modal sweep, completeness critic) apply unchanged; the difference is that breadth is free. Default shapes:
      - *Review / audit*: 6–12 Muse finders with distinct lenses → dedup in plain code → 3 Claude refuters per finding, majority wins → loop until two dry rounds.
      - *Design*: 3–5 Muse proposals from different angles → Claude judge panel → you synthesize from the winner.
