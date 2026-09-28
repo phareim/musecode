@@ -68,6 +68,10 @@ Exit codes: 0 ok · 2 usage · 3 still running · 4 no slot · anything else is 
 
 Portable to Linux and macOS: reads `/proc/meminfo` or `vm_stat`, uses `timeout`/`gtimeout` when present and a bash watchdog otherwise, `setsid` when present and `perl -MPOSIX` otherwise. Bash 3.2 (stock macOS) is enough.
 
+## On Sleeper: Muse on the Mac
+
+Sleeper (4 cores, 7.6 GB) fits only 3–5 Muse jobs, so it can also send them to Petter's Mac: `mac-muse "task"`, or the `mac-muse` relay agent (`agentType: 'mac-muse'`, protocol lines `MAC-START` / `MAC-WAIT <id>`). It lives in phareim/sleeper (`bin/mac-muse`, `claude/agents/mac-muse.md`, docs in `mac/README.md`), not here, because it depends on that host's ssh tunnel. The job runs on a synced mirror of the repo and its changes come back as a git patch; up to 6 run at once on the Mac. When the Mac is asleep or full, `mac-muse` falls back to `muse-run` on Sleeper. The Mac's own `muse-run` install (this repo, `~/.config/muse-run/env`) is separate and only serves sessions started on the Mac.
+
 ## Known behaviour of Muse Spark 1.3
 
 - **It does not verify unless told.** It reads and reasons but skips running tests, builds, or audits. Prompts that should verify must say so literally ("run `npm test` and paste the last 20 lines").
