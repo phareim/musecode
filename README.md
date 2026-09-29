@@ -7,7 +7,7 @@ Three pieces, wired into Claude Code by symlink:
 | File | Installed as | Role |
 |---|---|---|
 | `commands/musecode.md` | `~/.claude/commands/musecode.md` | The `/musecode <task>` slash command: how to scope, author the Workflow, and verify |
-| `agents/muse.md` | `~/.claude/agents/muse.md` | The `muse` relay agent (Haiku, Bash only). Runs `muse-run` and returns Muse's stdout verbatim |
+| `agents/muse.md` | `~/.claude/agents/muse.md` | The `muse` relay agent (Haiku, Bash only; a PreToolUse hook, `sleeper/claude/hooks/mac-relay-guard.sh muse-run`, blocks every command but `muse-run`). Runs `muse-run` and returns Muse's stdout verbatim |
 | `bin/muse-run` | `~/.local/bin/muse-run` | Bash CLI: one task → one detached `opencode run` job, with a memory-aware start gate |
 
 Outside a Workflow the same relay is `Agent({subagent_type: 'muse', prompt})`.
@@ -37,8 +37,8 @@ Everything environment-specific lives in **`~/.config/muse-run/env`** (plain she
 | Knob | Default | What it does |
 |---|---|---|
 | `MUSE_MODEL` | `opencode/muse-spark-1.3-contributor-free` | Model passed to `opencode run -m` |
-| `MUSE_MAX_JOBS` | 6 | Max concurrent opencode processes |
-| `MUSE_JOB_MB` / `MUSE_MEM_RESERVE_MB` | 800 / 1024 | A job starts only if `available − reserve ≥ job` (MB). One opencode run is 580–900 MB RSS |
+| `MUSE_MAX_JOBS` | 2 | Max concurrent opencode processes |
+| `MUSE_JOB_MB` / `MUSE_MEM_RESERVE_MB` | 800 / 1024 | A job starts only if `available − reserve ≥ job` (MB); available is the user slice's free memory (`memory.max − memory.current` under `/sys/fs/cgroup/user.slice/user-<uid>.slice`) when that slice has a cap, else `MemAvailable`/`vm_stat`. One opencode run is 580–900 MB RSS |
 | `MUSE_START_WAIT` | 300 | Seconds `--start` polls for a slot before exit 4 |
 | `MUSE_WAIT` | 540 | Foreground wait before `MUSE-RUN PENDING <id>` / exit 3 (stay under Claude's 600 s Bash cap) |
 | `MUSE_MAX` | 3600 | Hard wall per job |

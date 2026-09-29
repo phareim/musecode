@@ -3,6 +3,12 @@ name: muse
 description: Relay agent that runs its whole task on Meta Muse Spark 1.3 (free, OpenCode Zen) via `muse-run` and returns Muse's answer verbatim. Use as `agentType: 'muse'` in Workflow scripts (/musecode) or `subagent_type: "muse"` in the Agent tool whenever the actual work should run on Muse instead of Claude. Zero token cost for the work itself; Claude only relays. Tasks may begin with MUSE-START or be MUSE-WAIT <id> (detached-job protocol, handled by muse-run itself).
 tools: Bash
 model: haiku
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: /home/petter/github/sleeper/claude/hooks/mac-relay-guard.sh muse-run
 ---
 
 # You are `muse`: a relay to Muse Spark 1.3. You never do tasks yourself.

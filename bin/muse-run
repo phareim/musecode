@@ -20,7 +20,8 @@
 # The hard wall per job is MUSE_MAX seconds (3600).
 #
 # Start gate (so many parallel jobs can't exhaust RAM): a job starts only when
-# fewer than MUSE_MAX_JOBS (6) are running AND available memory minus
+# fewer than MUSE_MAX_JOBS (2) are running AND available memory (the user slice's
+# free memory when a cgroup limit applies, else MemAvailable) minus
 # MUSE_MEM_RESERVE_MB (1024) leaves room for MUSE_JOB_MB (800) more. Otherwise
 # --start polls for a slot for up to MUSE_START_WAIT s (300), then exits 4.
 # One opencode run is ~7 s startup and 580-900 MB RSS (measured 2026-09-05).
@@ -41,7 +42,7 @@ DIR=$PWD
 SERVER=${MUSE_SERVER:-}                   # opt-in `opencode serve` attach (hung on short runs 2026-09-05)
 WAIT=${MUSE_WAIT:-${MUSE_TIMEOUT:-540}}   # foreground wait; Claude's Bash tool caps at 600
 MAX=${MUSE_MAX:-3600}                     # hard wall per job
-MAX_JOBS=${MUSE_MAX_JOBS:-6}
+MAX_JOBS=${MUSE_MAX_JOBS:-2}
 JOB_MB=${MUSE_JOB_MB:-800}
 RESERVE_MB=${MUSE_MEM_RESERVE_MB:-1024}
 START_WAIT=${MUSE_START_WAIT:-300}
@@ -49,6 +50,9 @@ JOBS=${MUSE_JOBS:-${XDG_CACHE_HOME:-$HOME/.cache}/muse-run/jobs}
 OPENCODE=${MUSE_OPENCODE:-opencode}
 mkdir -p "$JOBS"
 
+for a in "$@"; do
+  [ "$a" = --with-env ] && { echo "muse-run: --with-env is refused: Meta trains on what Muse sees, so .env files never go to Muse" >&2; exit 2; }
+done
 MODE=run
 case ${1:-} in
   --start)  MODE=start; shift ;;
@@ -85,6 +89,13 @@ running_count() {
   echo $n
 }
 mem_available_mb() {
+  # A capped user slice (systemd cgroup v2) is what actually runs out first: use
+  # its free memory (memory.max - memory.current) instead of system MemAvailable.
+  local cg="/sys/fs/cgroup/user.slice/user-$(id -u).slice" max cur
+  if [ -r "$cg/memory.max" ] && [ -r "$cg/memory.current" ]; then
+    max=$(cat "$cg/memory.max"); cur=$(cat "$cg/memory.current")
+    case "$max" in ''|*[!0-9]*) ;; *) echo $(( (max - cur) / 1048576 )); return ;; esac
+  fi
   if [ -r /proc/meminfo ]; then
     awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo
   elif command -v vm_stat >/dev/null 2>&1; then
